@@ -1,0 +1,136 @@
+name: fastapi-DevSecOps pipeline
+
+on: 
+  push:
+    branches:
+      - main
+
+jobs:
+  #---STAGE 1 : SAST (Static Application Security Testing)
+  Code_Quality_Scan:
+    name: SonarQube Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+        
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: SonarQube Quality Gate Check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN}}
+
+
+  #----STAGE 2 : BUILD
+  Build_Image:
+    name: Build Docker Image
+    needs: Code_Quality_Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Exporting the image as tar archive to pass to next job
+      - name: Build and export image
+        run: |
+          docker build -t fastapi-devops:${{ github.sha }} .
+          docker save fastapi-devops:${{ github.sha }} > myimage.tar
+
+      # Uploading the image as an artifact for scanner job
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: myimage.tar
+          retention-days: 1
+  
+  #----STAGE 3 : Container Scanning using Trivy
+  Scan_Image:
+    name: Trivy Vulnerability Scan
+    needs: Build_Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+      
+      - name: Load Docker image
+        run: docker load < myimage.tar
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'fastapi-devops:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+  #----STAGE 4 : Push To Dockerhub-----
+  Push_to_Registry: 
+    name: Push to DockerHub
+    needs: Scan_Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+
+      - name: Load Docker image
+        run: docker load < myimage.tar
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      #-- Tagging the image before pushing it to the dockerhub
+      - name: Tag and Push Docker image
+        run: |
+          docker tag fastapi-devops:${{ github.sha }} ${{ secrets.DOCKERHUN_USERNAME }}/fastapi-devops:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/fastapi-devops:${{ github.sha }}
+
+  #---STAGE 5 : Deployment----------
+  Deploy_to_EC2:
+      name: Deploy Stack to EC2 via SSH
+      needs: Push_to_Registry
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout Code
+          uses: actions/checkout@v4
+
+        - name: Execute Remote SSH Commands
+          uses: appleboy/ssh-actions@v1.0.3
+          env:
+            APP_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/fastapi-devops:${{ github.sha }}
+            ENV_FILE_CONTENT: ${{ secrets.PROD_ENV_FILE }}
+          with:
+            host: ${{ secrets.EC_HOST }}
+            username: ${{ secrets.EC2_USER }}
+            key: ${{ secrets.ECR_SSH_KEY }}
+            envs: APP_IMAGE, ENV_FILE_CONTENT
+            script: |
+              mkdir -p /home/${{ secrets.EC2_USER }}/fastapi-devops
+              cd /home/${{ secrets.EC2_USER }}/fastapi-devops
+
+              echo "$ENV_FILE_CONTENT" > .env:
+              echo "APP_IMAGE_TAG=$APP_IMAGE" >> .env:
+              
+              sudo docker compose pull app
+              sudo docker compose up -d --no-deps -- build app
+              sudo docker image prune -a -f
