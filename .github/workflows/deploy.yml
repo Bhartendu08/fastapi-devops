@@ -128,9 +128,9 @@ jobs:
               mkdir -p /home/${{ secrets.EC2_USER }}/fastapi-devops
               cd /home/${{ secrets.EC2_USER }}/fastapi-devops
 
-              echo "$ENV_FILE_CONTENT" > .env:
-              echo "APP_IMAGE_TAG=$APP_IMAGE" >> .env:
+              echo "$ENV_FILE_CONTENT" > .env
+              echo "APP_IMAGE_TAG=$APP_IMAGE" >> .env
               
-              sudo docker compose pull app
-              sudo docker compose up -d --no-deps -- build app
+              sudo docker compose pull
+              sudo docker compose up -d
               sudo docker image prune -a -f
