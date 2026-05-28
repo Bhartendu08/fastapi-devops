@@ -4,6 +4,8 @@ WORKDIR /app
 
 COPY app/requirements.txt .
 
+RUN pip install --upgrade wheel jaraco.context
+
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
